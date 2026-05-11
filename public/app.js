@@ -18,7 +18,15 @@
 
 // ---------- Constants ----------
 
+/*
+ * thinkingMode controls which API shape we use when the user toggles Think on:
+ *   - "adaptive": send thinking: {type: "adaptive"} — Claude decides whether to think.
+ *     Opus 4.7+ uses this; it rejects the old extended-thinking shape.
+ *   - "extended" (default): send thinking: {type: "enabled", budget_tokens: 4096}.
+ *     The original mechanism on Claude 4.x models.
+ */
 const MODELS = [
+  { id: "claude-opus-4-7",            label: "Opus 4.7",       pricePerMillion: { input: 15, output: 75 }, supportsThinking: true, thinkingMode: "adaptive" },
   { id: "claude-opus-4-6",            label: "Opus 4.6",       pricePerMillion: { input: 15, output: 75 }, supportsThinking: true },
   { id: "claude-opus-4-5-20251101",   label: "Opus 4.5",       pricePerMillion: { input: 15, output: 75 }, supportsThinking: true },
   { id: "claude-opus-4-1-20250805",   label: "Opus 4.1",       pricePerMillion: { input: 15, output: 75 }, supportsThinking: true },
@@ -963,10 +971,16 @@ function renderProject() {
   $("web-search-toggle").checked = !!project.webSearch;
 
   const thinkingToggle = $("thinking-toggle");
-  const supports = modelInfo(project.model).supportsThinking;
+  const info = modelInfo(project.model);
+  const supports = info.supportsThinking;
+  const mode = info.thinkingMode || "extended";
   thinkingToggle.checked = !!project.thinking && supports;
   thinkingToggle.disabled = !supports;
-  thinkingToggle.parentElement.title = supports ? "Extended thinking" : "This model doesn't support extended thinking";
+  thinkingToggle.parentElement.title = !supports
+    ? "This model doesn't support thinking."
+    : mode === "adaptive"
+      ? "Adaptive thinking — Claude decides when to think (Opus 4.7+)."
+      : "Extended thinking — Claude reasons before responding, with a token budget.";
 
   $("system-prompt").value = project.systemPrompt || "";
 

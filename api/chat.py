@@ -56,12 +56,22 @@ class handler(BaseHTTPRequestHandler):
                 "Environment Variables, then redeploy.",
             )
 
+        model = data.get("model") or DEFAULT_MODEL
+        thinking_on = bool(data.get("thinking"))
+        # Opus 4.7+ uses adaptive thinking. It rejects the old extended-thinking
+        # shape AND rejects temperature/top_p/top_k entirely. Older models use
+        # the classic extended-thinking budget. Picking the right shape per model
+        # is the difference between a clean response and a 400 invalid_request.
+        uses_adaptive_thinking = model in {"claude-opus-4-7"}
+
         max_tokens = int(data.get("maxTokens") or DEFAULT_MAX_TOKENS)
-        if data.get("thinking"):
+        # Extended thinking needs max_tokens > budget. Adaptive has no budget,
+        # so this bump only applies to the older models.
+        if thinking_on and not uses_adaptive_thinking:
             max_tokens = max(max_tokens, THINKING_BUDGET + 4096)
 
         kwargs = {
-            "model": data.get("model") or DEFAULT_MODEL,
+            "model": model,
             "max_tokens": max_tokens,
             "messages": data.get("messages") or [],
         }
@@ -78,8 +88,11 @@ class handler(BaseHTTPRequestHandler):
                 "name": "web_search",
                 "max_uses": 5,
             }]
-        if data.get("thinking"):
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
+        if thinking_on:
+            if uses_adaptive_thinking:
+                kwargs["thinking"] = {"type": "adaptive"}
+            else:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
