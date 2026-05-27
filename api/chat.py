@@ -75,13 +75,22 @@ class handler(BaseHTTPRequestHandler):
             "max_tokens": max_tokens,
             "messages": data.get("messages") or [],
         }
+        # The system prompt is sent as two blocks for prompt caching: the
+        # stable block (identity + memories + project prompt) carries the cache
+        # breakpoint, and an optional volatile block (time + conversation gap)
+        # rides after it so it never busts the cached prefix. When no volatile
+        # block is sent, this is identical to a single cached system block.
         system = data.get("system")
         if system:
-            kwargs["system"] = [{
+            blocks = [{
                 "type": "text",
                 "text": system,
                 "cache_control": {"type": "ephemeral"},
             }]
+            volatile = data.get("systemVolatile")
+            if volatile:
+                blocks.append({"type": "text", "text": volatile})
+            kwargs["system"] = blocks
         if data.get("useWebSearch"):
             kwargs["tools"] = [{
                 "type": "web_search_20250305",
