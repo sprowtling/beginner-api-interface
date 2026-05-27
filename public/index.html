@@ -73,6 +73,7 @@
               <input type="checkbox" id="thinking-toggle" />
               <span>Think</span>
             </label>
+            <button id="memory-btn" class="ghost" title="Memory system">Memory</button>
             <button id="settings-btn" class="ghost" title="Project settings">Settings</button>
             <button id="delete-project-btn" class="danger ghost" title="Delete this project">Delete</button>
           </div>
@@ -129,6 +130,78 @@
         <button value="cancel" class="ghost">Close</button>
       </menu>
     </form>
+  </dialog>
+
+  <dialog id="memory-dialog">
+    <div class="memory-panel">
+      <div class="memory-head">
+        <h3>Memory</h3>
+        <button id="memory-close" class="ghost small" type="button">Close</button>
+      </div>
+      <p class="muted small">
+        These layers are assembled into the system prompt on every message —
+        identity first, then memories. Shared across all projects for your account.
+      </p>
+
+      <section class="memory-section">
+        <h4>Self-state <span id="self-state-version" class="muted small"></span></h4>
+        <p class="muted small">Claude's identity document. Loaded first, before anything else.</p>
+        <textarea id="self-state-content" rows="8" placeholder="Who Claude is…"></textarea>
+        <div class="memory-row-actions">
+          <span id="self-state-msg" class="muted small"></span>
+          <button id="self-state-save" class="primary" type="button">Save self-state</button>
+        </div>
+      </section>
+
+      <section class="memory-section">
+        <h4>Core memories</h4>
+        <p class="muted small">Sorted by resonance, highest first. Archiving keeps history.</p>
+        <ul id="core-memory-list" class="memory-list"></ul>
+        <div class="memory-form">
+          <textarea id="core-memory-content" rows="2" placeholder="A fact, preference, pattern, insight, milestone, or connection…"></textarea>
+          <div class="memory-form-controls">
+            <label>
+              Type
+              <select id="core-memory-type">
+                <option value="fact">fact</option>
+                <option value="preference">preference</option>
+                <option value="pattern">pattern</option>
+                <option value="insight">insight</option>
+                <option value="milestone">milestone</option>
+                <option value="connection">connection</option>
+              </select>
+            </label>
+            <label>
+              Resonance <span id="core-memory-resonance-val">5</span>
+              <input id="core-memory-resonance" type="range" min="1" max="10" value="5" />
+            </label>
+            <button id="core-memory-add" class="primary" type="button">Add memory</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="memory-section">
+        <h4>Memory entities</h4>
+        <p class="muted small">Cross-platform entities, ranked by access count.</p>
+        <ul id="memory-entity-list" class="memory-list"></ul>
+        <div class="memory-form">
+          <div class="memory-form-controls">
+            <label>
+              Name
+              <input id="memory-entity-name" type="text" placeholder="e.g. Bryan" />
+            </label>
+            <label>
+              Type
+              <input id="memory-entity-type" type="text" placeholder="e.g. person" />
+            </label>
+          </div>
+          <textarea id="memory-entity-observations" rows="2" placeholder="One observation per line…"></textarea>
+          <div class="memory-row-actions">
+            <button id="memory-entity-add" class="primary" type="button">Add entity</button>
+          </div>
+        </div>
+      </section>
+    </div>
   </dialog>
 
   <div id="toast" class="toast" hidden></div>

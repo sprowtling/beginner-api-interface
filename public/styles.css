@@ -759,6 +759,144 @@ dialog::backdrop {
   margin-right: 8px;
 }
 
+/* Memory dialog */
+#memory-dialog { max-width: 640px; }
+
+.memory-panel {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.memory-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.memory-head h3 { margin: 0; font-size: 16px; }
+
+.memory-section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-section h4 {
+  margin: 0;
+  font-size: 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.memory-section p { margin: 0; }
+
+.memory-section textarea,
+.memory-section input[type="text"],
+.memory-section select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+  width: 100%;
+}
+
+.memory-section textarea:focus,
+.memory-section input[type="text"]:focus,
+.memory-section select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.memory-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-list li {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.memory-list .mem-body { flex: 1; min-width: 0; }
+
+.memory-list .mem-text {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 13px;
+}
+
+.memory-list .mem-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.memory-list .mem-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.memory-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.memory-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+
+.memory-form-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.memory-form-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.memory-form-controls > label:first-child { flex: 1; min-width: 120px; }
+
+.memory-form-controls .primary { margin-left: auto; }
+
 .muted { color: var(--text-muted); }
 .small { font-size: 12px; }
 

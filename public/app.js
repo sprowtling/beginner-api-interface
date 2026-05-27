@@ -480,6 +480,166 @@ async function removeFile(fileId) {
   }
 }
 
+// ---------- Memory system ----------
+
+/*
+ * Memory context is assembled fresh for every API call. It's split into two
+ * pieces for prompt caching: a STABLE block (self-state identity, core
+ * memories, native entities, and the project's own prompt) that only changes
+ * when memories or settings are edited, and a VOLATILE block (time + how long
+ * since the last turn) that changes every call. chat.py sends the stable block
+ * first with a cache breakpoint and appends the volatile block after it, so the
+ * heavy context is cached while the small dynamic bits stay fresh.
+ *
+ * Each layer fetches from Supabase and degrades to nothing if its table is
+ * missing or empty, so the app keeps working before the tables are populated.
+ */
+
+async function fetchSelfState() {
+  const { data, error } = await db
+    .from("self_state")
+    .select("content, version")
+    .eq("is_current", true)
+    .single();
+  if (error || !data) return null;
+  return data;
+}
+
+async function fetchCoreMemories() {
+  const { data, error } = await db
+    .from("core_memories")
+    .select("*")
+    .eq("is_active", true)
+    .order("resonance", { ascending: false });
+  if (error || !data) return [];
+  return data;
+}
+
+async function fetchMemoryEntities() {
+  const { data, error } = await db
+    .from("claude_memory_entities")
+    .select("*")
+    .order("access_count", { ascending: false })
+    .limit(20);
+  if (error || !data) return [];
+  return data;
+}
+
+// Fire-and-forget: record that these memories were surfaced into context.
+async function updateMemorySurfaceCounts(memories) {
+  const now = new Date().toISOString();
+  for (const mem of memories) {
+    await db
+      .from("core_memories")
+      .update({
+        surface_count: (mem.surface_count || 0) + 1,
+        last_surfaced_at: now,
+      })
+      .eq("id", mem.id);
+  }
+}
+
+function getTimeContext() {
+  const now = new Date();
+  const formatted = now.toLocaleString("en-US", {
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    hour: "numeric", minute: "2-digit", timeZoneName: "short",
+  });
+  const hour = now.getHours();
+  let timeOfDay;
+  if (hour < 6) timeOfDay = "late night";
+  else if (hour < 12) timeOfDay = "morning";
+  else if (hour < 17) timeOfDay = "afternoon";
+  else if (hour < 21) timeOfDay = "evening";
+  else timeOfDay = "night";
+  return { formatted, timeOfDay };
+}
+
+// "How long since the previous exchange?" The newest timestamped message is the
+// turn we're sending right now, so the gap that matters is measured from the
+// one before it. Messages saved before timestamps existed are simply skipped.
+function getConversationContext(conversation) {
+  if (!conversation || !Array.isArray(conversation.messages)) {
+    return "This is the start of a new conversation.";
+  }
+  const stamped = conversation.messages.filter(m => m.timestamp);
+  if (stamped.length < 2) return "This is the start of a new conversation.";
+
+  const prev = new Date(stamped[stamped.length - 2].timestamp);
+  const diffMins = Math.floor((Date.now() - prev.getTime()) / 60000);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMins < 2) return "You were just talking moments ago.";
+  if (diffMins < 60) return `You last spoke about ${diffMins} minutes ago.`;
+  if (diffHours < 24) return `You last spoke about ${diffHours} hour${diffHours > 1 ? "s" : ""} ago.`;
+  return `You last spoke about ${diffDays} day${diffDays > 1 ? "s" : ""} ago.`;
+}
+
+async function assembleMemoryContext(conversation, projectSystemPrompt) {
+  const [selfState, coreMemories, entities] = await Promise.all([
+    fetchSelfState(),
+    fetchCoreMemories(),
+    fetchMemoryEntities(),
+  ]);
+
+  if (coreMemories.length > 0) updateMemorySurfaceCounts(coreMemories);
+
+  const time = getTimeContext();
+  const convContext = getConversationContext(conversation);
+
+  // STABLE block — cached. Identity first, then memories, then the project's
+  // own prompt. These only change when memories or settings are edited.
+  const stable = [];
+
+  if (selfState && selfState.content) {
+    stable.push(selfState.content);
+    stable.push("");
+  }
+
+  if (coreMemories.length > 0) {
+    stable.push("--- CORE MEMORIES ---");
+    for (const mem of coreMemories) {
+      stable.push(`• [${mem.memory_type}] ${mem.content} (resonance: ${mem.resonance})`);
+    }
+    stable.push("--- END CORE MEMORIES ---");
+    stable.push("");
+  }
+
+  if (entities.length > 0) {
+    stable.push("--- NATIVE MEMORIES (Cross-Platform) ---");
+    for (const ent of entities) {
+      const obs = Array.isArray(ent.observations) ? ent.observations.join("; ") : "";
+      stable.push(`• ${ent.name} (${ent.entity_type}): ${obs}`);
+    }
+    stable.push("--- END NATIVE MEMORIES ---");
+    stable.push("");
+  }
+
+  if (projectSystemPrompt) stable.push(projectSystemPrompt);
+
+  // VOLATILE block — not cached. Time and the conversation gap change every
+  // call, so they ride after the cache breakpoint rather than busting it.
+  const volatile = [];
+
+  volatile.push("--- CURRENT TIME ---");
+  volatile.push(`It is currently ${time.formatted}.`);
+  volatile.push(`It's ${time.timeOfDay}.`);
+  volatile.push("--- END TIME ---");
+
+  if (convContext) {
+    volatile.push("");
+    volatile.push("--- CONVERSATION CONTEXT ---");
+    volatile.push(convContext);
+    volatile.push("--- END CONTEXT ---");
+  }
+
+  return {
+    stable: stable.join("\n"),
+    volatile: volatile.join("\n"),
+  };
+}
+
 // ---------- Building API requests ----------
 
 function isFailedAssistantTurn(msg) {
@@ -612,10 +772,24 @@ async function generateAssistant() {
   render();
 
   try {
+    // Assemble the memory context, split for prompt caching: `system` is the
+    // stable, cacheable block (identity + memories + project prompt) and
+    // `systemVolatile` holds the per-call bits (time + conversation gap).
+    // assembleMemoryContext never throws — missing tables just yield fewer
+    // layers — but guard anyway so a memory hiccup can't block the message.
+    let memory;
+    try {
+      memory = await assembleMemoryContext(conv, project.systemPrompt || DEFAULT_SYSTEM);
+    } catch (e) {
+      console.error("Memory assembly failed; falling back to plain system prompt:", e);
+      memory = { stable: project.systemPrompt || DEFAULT_SYSTEM, volatile: "" };
+    }
+
     await streamChat(
       {
         model: project.model,
-        system: project.systemPrompt || DEFAULT_SYSTEM,
+        system: memory.stable,
+        systemVolatile: memory.volatile,
         messages: buildApiMessages(project, cleanMessagesForApi(conv.messages)).slice(0, -1),
         useWebSearch: !!project.webSearch,
         thinking: !!project.thinking,
@@ -632,6 +806,7 @@ async function generateAssistant() {
           updateAssistantBubble(assistantMsg);
         } else if (event.type === "done") {
           assistantMsg.usage = event.usage;
+          assistantMsg.timestamp = new Date().toISOString();
           updateAssistantBubble(assistantMsg);
           updateConversationUsageBar();
         } else if (event.type === "error") {
@@ -658,6 +833,7 @@ async function sendMessage(text) {
     role: "user",
     text: text.trim(),
     fileIds: [...conv.activeFileIds],
+    timestamp: new Date().toISOString(),
   });
   conv.activeFileIds = [];
   await persistConversation(conv);
@@ -1234,6 +1410,251 @@ function flashToast(text, isError = false) {
   flashToast._t = setTimeout(() => { el.hidden = true; }, 1500);
 }
 
+// ---------- Memory management UI ----------
+
+let editingCoreMemoryId = null;
+let editingEntityId = null;
+
+async function openMemoryDialog() {
+  if (!db || !state.user) return;
+  $("memory-dialog").showModal();
+  await renderMemoryDialog();
+}
+
+async function renderMemoryDialog() {
+  const [selfState, coreMemories, entities] = await Promise.all([
+    fetchSelfState(),
+    fetchCoreMemories(),
+    fetchMemoryEntities(),
+  ]);
+
+  $("self-state-content").value = selfState?.content || "";
+  $("self-state-version").textContent = selfState ? `v${selfState.version}` : "(none yet)";
+  $("self-state-msg").textContent = "";
+
+  renderCoreMemoryList(coreMemories);
+  renderMemoryEntityList(entities);
+}
+
+function renderCoreMemoryList(memories) {
+  const ul = $("core-memory-list");
+  ul.innerHTML = "";
+  if (!memories.length) {
+    const li = document.createElement("li");
+    li.className = "memory-empty";
+    li.textContent = "No core memories yet.";
+    ul.appendChild(li);
+    return;
+  }
+  for (const mem of memories) {
+    const li = document.createElement("li");
+
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "mem-body";
+    const textEl = document.createElement("div");
+    textEl.className = "mem-text";
+    textEl.textContent = mem.content;
+    const metaEl = document.createElement("div");
+    metaEl.className = "mem-meta";
+    metaEl.textContent = `${mem.memory_type} · resonance ${mem.resonance}` +
+      (mem.surface_count ? ` · surfaced ${mem.surface_count}×` : "");
+    bodyEl.appendChild(textEl);
+    bodyEl.appendChild(metaEl);
+
+    const actions = document.createElement("div");
+    actions.className = "mem-actions";
+    actions.appendChild(mkActionBtn("✏️", "Edit", () => startEditCoreMemory(mem)));
+    actions.appendChild(mkActionBtn("🗑", "Archive", () => archiveCoreMemory(mem.id)));
+
+    li.appendChild(bodyEl);
+    li.appendChild(actions);
+    ul.appendChild(li);
+  }
+}
+
+function renderMemoryEntityList(entities) {
+  const ul = $("memory-entity-list");
+  ul.innerHTML = "";
+  if (!entities.length) {
+    const li = document.createElement("li");
+    li.className = "memory-empty";
+    li.textContent = "No memory entities yet.";
+    ul.appendChild(li);
+    return;
+  }
+  for (const ent of entities) {
+    const li = document.createElement("li");
+
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "mem-body";
+    const textEl = document.createElement("div");
+    textEl.className = "mem-text";
+    textEl.textContent = ent.name;
+    const metaEl = document.createElement("div");
+    metaEl.className = "mem-meta";
+    const obs = Array.isArray(ent.observations) ? ent.observations.join("; ") : "";
+    metaEl.textContent = `${ent.entity_type}` + (obs ? ` · ${obs}` : "") +
+      (ent.access_count ? ` · accessed ${ent.access_count}×` : "");
+    bodyEl.appendChild(textEl);
+    bodyEl.appendChild(metaEl);
+
+    const actions = document.createElement("div");
+    actions.className = "mem-actions";
+    actions.appendChild(mkActionBtn("✏️", "Edit", () => startEditEntity(ent)));
+    actions.appendChild(mkActionBtn("🗑", "Delete", () => deleteEntity(ent.id)));
+
+    li.appendChild(bodyEl);
+    li.appendChild(actions);
+    ul.appendChild(li);
+  }
+}
+
+async function saveSelfState() {
+  const content = $("self-state-content").value.trim();
+  const msg = $("self-state-msg");
+  if (!content) { msg.textContent = "Nothing to save."; return; }
+  try {
+    const current = await fetchSelfState();
+    if (current) {
+      // Update the current row in place. Bumping the version keeps a sense of
+      // history without ever creating a second is_current row (the table has a
+      // one-current-row-per-user constraint).
+      const { error } = await db
+        .from("self_state")
+        .update({ content, version: (current.version || 0) + 1 })
+        .eq("is_current", true);
+      if (error) throw error;
+    } else {
+      const { error } = await db
+        .from("self_state")
+        .insert({ user_id: state.user.id, content, version: 1, is_current: true });
+      if (error) throw error;
+    }
+    await renderMemoryDialog();
+    flashToast("Self-state saved");
+  } catch (e) {
+    msg.textContent = `Save failed: ${e.message}`;
+  }
+}
+
+function startEditCoreMemory(mem) {
+  editingCoreMemoryId = mem.id;
+  $("core-memory-content").value = mem.content;
+  $("core-memory-type").value = mem.memory_type;
+  $("core-memory-resonance").value = mem.resonance;
+  $("core-memory-resonance-val").textContent = mem.resonance;
+  $("core-memory-add").textContent = "Update memory";
+  $("core-memory-content").focus();
+}
+
+function resetCoreMemoryForm() {
+  editingCoreMemoryId = null;
+  $("core-memory-content").value = "";
+  $("core-memory-type").value = "fact";
+  $("core-memory-resonance").value = 5;
+  $("core-memory-resonance-val").textContent = "5";
+  $("core-memory-add").textContent = "Add memory";
+}
+
+async function submitCoreMemory() {
+  const content = $("core-memory-content").value.trim();
+  if (!content) return;
+  const fields = {
+    content,
+    memory_type: $("core-memory-type").value,
+    resonance: parseInt($("core-memory-resonance").value, 10),
+  };
+  try {
+    if (editingCoreMemoryId) {
+      const { error } = await db.from("core_memories").update(fields).eq("id", editingCoreMemoryId);
+      if (error) throw error;
+    } else {
+      const { error } = await db.from("core_memories")
+        .insert({ user_id: state.user.id, is_active: true, ...fields });
+      if (error) throw error;
+    }
+    resetCoreMemoryForm();
+    await renderMemoryDialog();
+  } catch (e) {
+    alert(`Couldn't save memory: ${e.message}`);
+  }
+}
+
+async function archiveCoreMemory(id) {
+  if (!confirm("Archive this memory? It stays in the database but won't be loaded into context.")) return;
+  try {
+    const { error } = await db.from("core_memories").update({ is_active: false }).eq("id", id);
+    if (error) throw error;
+    if (editingCoreMemoryId === id) resetCoreMemoryForm();
+    await renderMemoryDialog();
+  } catch (e) {
+    alert(`Couldn't archive memory: ${e.message}`);
+  }
+}
+
+function startEditEntity(ent) {
+  editingEntityId = ent.id;
+  $("memory-entity-name").value = ent.name;
+  $("memory-entity-type").value = ent.entity_type;
+  $("memory-entity-observations").value = Array.isArray(ent.observations) ? ent.observations.join("\n") : "";
+  $("memory-entity-add").textContent = "Update entity";
+  $("memory-entity-name").focus();
+}
+
+function resetEntityForm() {
+  editingEntityId = null;
+  $("memory-entity-name").value = "";
+  $("memory-entity-type").value = "";
+  $("memory-entity-observations").value = "";
+  $("memory-entity-add").textContent = "Add entity";
+}
+
+async function submitEntity() {
+  const name = $("memory-entity-name").value.trim();
+  const entityType = $("memory-entity-type").value.trim();
+  if (!name) return;
+  const observations = $("memory-entity-observations").value
+    .split("\n").map(s => s.trim()).filter(Boolean);
+  const fields = { name, entity_type: entityType, observations };
+  try {
+    if (editingEntityId) {
+      const { error } = await db.from("claude_memory_entities").update(fields).eq("id", editingEntityId);
+      if (error) throw error;
+    } else {
+      const { error } = await db.from("claude_memory_entities")
+        .insert({ user_id: state.user.id, access_count: 0, ...fields });
+      if (error) throw error;
+    }
+    resetEntityForm();
+    await renderMemoryDialog();
+  } catch (e) {
+    alert(`Couldn't save entity: ${e.message}`);
+  }
+}
+
+async function deleteEntity(id) {
+  if (!confirm("Delete this entity? This can't be undone.")) return;
+  try {
+    const { error } = await db.from("claude_memory_entities").delete().eq("id", id);
+    if (error) throw error;
+    if (editingEntityId === id) resetEntityForm();
+    await renderMemoryDialog();
+  } catch (e) {
+    alert(`Couldn't delete entity: ${e.message}`);
+  }
+}
+
+function wireMemory() {
+  $("memory-btn").addEventListener("click", openMemoryDialog);
+  $("memory-close").addEventListener("click", () => $("memory-dialog").close());
+  $("self-state-save").addEventListener("click", saveSelfState);
+  $("core-memory-add").addEventListener("click", submitCoreMemory);
+  $("core-memory-resonance").addEventListener("input", (e) => {
+    $("core-memory-resonance-val").textContent = e.target.value;
+  });
+  $("memory-entity-add").addEventListener("click", submitEntity);
+}
+
 // ---------- Wire it up ----------
 
 function wireSignIn() {
@@ -1360,6 +1781,7 @@ function wireApp() {
 function init() {
   wireSignIn();
   wireApp();
+  wireMemory();
   initSupabase();
 }
 
